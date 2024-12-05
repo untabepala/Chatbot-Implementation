@@ -1,148 +1,332 @@
-"""Joblib is a set of tools to provide **lightweight pipelining in
-Python**. In particular:
+import functools
+import string
+import sys
+import typing as t
 
-1. transparent disk-caching of functions and lazy re-evaluation
-   (memoize pattern)
+if t.TYPE_CHECKING:
+    import typing_extensions as te
 
-2. easy simple parallel computing
+    class HasHTML(te.Protocol):
+        def __html__(self) -> str:
+            pass
 
-Joblib is optimized to be **fast** and **robust** on large
-data in particular and has specific optimizations for `numpy` arrays. It is
-**BSD-licensed**.
-
-
-    ==================== ===============================================
-    **Documentation:**       https://joblib.readthedocs.io
-
-    **Download:**            https://pypi.python.org/pypi/joblib#downloads
-
-    **Source code:**         https://github.com/joblib/joblib
-
-    **Report issues:**       https://github.com/joblib/joblib/issues
-    ==================== ===============================================
+    _P = te.ParamSpec("_P")
 
 
-Vision
---------
-
-The vision is to provide tools to easily achieve better performance and
-reproducibility when working with long running jobs.
-
- *  **Avoid computing the same thing twice**: code is often rerun again and
-    again, for instance when prototyping computational-heavy jobs (as in
-    scientific development), but hand-crafted solutions to alleviate this
-    issue are error-prone and often lead to unreproducible results.
-
- *  **Persist to disk transparently**: efficiently persisting
-    arbitrary objects containing large data is hard. Using
-    joblib's caching mechanism avoids hand-written persistence and
-    implicitly links the file on disk to the execution context of
-    the original Python object. As a result, joblib's persistence is
-    good for resuming an application status or computational job, eg
-    after a crash.
-
-Joblib addresses these problems while **leaving your code and your flow
-control as unmodified as possible** (no framework, no new paradigms).
-
-Main features
-------------------
-
-1) **Transparent and fast disk-caching of output value:** a memoize or
-   make-like functionality for Python functions that works well for
-   arbitrary Python objects, including very large numpy arrays. Separate
-   persistence and flow-execution logic from domain logic or algorithmic
-   code by writing the operations as a set of steps with well-defined
-   inputs and  outputs: Python functions. Joblib can save their
-   computation to disk and rerun it only if necessary::
-
-      >>> from joblib import Memory
-      >>> cachedir = 'your_cache_dir_goes_here'
-      >>> mem = Memory(cachedir)
-      >>> import numpy as np
-      >>> a = np.vander(np.arange(3)).astype(float)
-      >>> square = mem.cache(np.square)
-      >>> b = square(a)                                   # doctest: +ELLIPSIS
-      ______________________________________________________________________...
-      [Memory] Calling square...
-      square(array([[0., 0., 1.],
-             [1., 1., 1.],
-             [4., 2., 1.]]))
-      _________________________________________________...square - ...s, 0.0min
-
-      >>> c = square(a)
-      >>> # The above call did not trigger an evaluation
-
-2) **Embarrassingly parallel helper:** to make it easy to write readable
-   parallel code and debug it quickly::
-
-      >>> from joblib import Parallel, delayed
-      >>> from math import sqrt
-      >>> Parallel(n_jobs=1)(delayed(sqrt)(i**2) for i in range(10))
-      [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+__version__ = "2.1.5"
 
 
-3) **Fast compressed Persistence**: a replacement for pickle to work
-   efficiently on Python objects containing large data (
-   *joblib.dump* & *joblib.load* ).
+def _simple_escaping_wrapper(func: "t.Callable[_P, str]") -> "t.Callable[_P, Markup]":
+    @functools.wraps(func)
+    def wrapped(self: "Markup", *args: "_P.args", **kwargs: "_P.kwargs") -> "Markup":
+        arg_list = _escape_argspec(list(args), enumerate(args), self.escape)
+        _escape_argspec(kwargs, kwargs.items(), self.escape)
+        return self.__class__(func(self, *arg_list, **kwargs))  # type: ignore[arg-type]
 
-..
-    >>> import shutil ; shutil.rmtree(cachedir)
-
-"""
-
-# PEP0440 compatible formatted version, see:
-# https://www.python.org/dev/peps/pep-0440/
-#
-# Generic release markers:
-# X.Y
-# X.Y.Z # For bugfix releases
-#
-# Admissible pre-release markers:
-# X.YaN # Alpha release
-# X.YbN # Beta release
-# X.YrcN # Release Candidate
-# X.Y # Final release
-#
-# Dev branch marker is: 'X.Y.dev' or 'X.Y.devN' where N is an integer.
-# 'X.Y.dev0' is the canonical version of 'X.Y.dev'
-#
-__version__ = '1.4.2'
+    return wrapped  # type: ignore[return-value]
 
 
-import os
+class Markup(str):
+    """A string that is ready to be safely inserted into an HTML or XML
+    document, either because it was escaped or because it was marked
+    safe.
 
-from .memory import Memory
-from .memory import MemorizedResult
-from .memory import register_store_backend
-from .memory import expires_after
+    Passing an object to the constructor converts it to text and wraps
+    it to mark it safe without escaping. To escape the text, use the
+    :meth:`escape` class method instead.
 
-from .logger import PrintTime
-from .logger import Logger
+    >>> Markup("Hello, <em>World</em>!")
+    Markup('Hello, <em>World</em>!')
+    >>> Markup(42)
+    Markup('42')
+    >>> Markup.escape("Hello, <em>World</em>!")
+    Markup('Hello &lt;em&gt;World&lt;/em&gt;!')
 
-from .hashing import hash
+    This implements the ``__html__()`` interface that some frameworks
+    use. Passing an object that implements ``__html__()`` will wrap the
+    output of that method, marking it safe.
 
-from .numpy_pickle import dump
-from .numpy_pickle import load
+    >>> class Foo:
+    ...     def __html__(self):
+    ...         return '<a href="/foo">foo</a>'
+    ...
+    >>> Markup(Foo())
+    Markup('<a href="/foo">foo</a>')
 
-from .compressor import register_compressor
+    This is a subclass of :class:`str`. It has the same methods, but
+    escapes their arguments and returns a ``Markup`` instance.
 
-from .parallel import Parallel
-from .parallel import delayed
-from .parallel import cpu_count
-from .parallel import register_parallel_backend
-from .parallel import parallel_backend
-from .parallel import parallel_config
-from .parallel import effective_n_jobs
-from ._cloudpickle_wrapper import wrap_non_picklable_objects
+    >>> Markup("<em>%s</em>") % ("foo & bar",)
+    Markup('<em>foo &amp; bar</em>')
+    >>> Markup("<em>Hello</em> ") + "<foo>"
+    Markup('<em>Hello</em> &lt;foo&gt;')
+    """
+
+    __slots__ = ()
+
+    def __new__(
+        cls, base: t.Any = "", encoding: t.Optional[str] = None, errors: str = "strict"
+    ) -> "te.Self":
+        if hasattr(base, "__html__"):
+            base = base.__html__()
+
+        if encoding is None:
+            return super().__new__(cls, base)
+
+        return super().__new__(cls, base, encoding, errors)
+
+    def __html__(self) -> "te.Self":
+        return self
+
+    def __add__(self, other: t.Union[str, "HasHTML"]) -> "te.Self":
+        if isinstance(other, str) or hasattr(other, "__html__"):
+            return self.__class__(super().__add__(self.escape(other)))
+
+        return NotImplemented
+
+    def __radd__(self, other: t.Union[str, "HasHTML"]) -> "te.Self":
+        if isinstance(other, str) or hasattr(other, "__html__"):
+            return self.escape(other).__add__(self)
+
+        return NotImplemented
+
+    def __mul__(self, num: "te.SupportsIndex") -> "te.Self":
+        if isinstance(num, int):
+            return self.__class__(super().__mul__(num))
+
+        return NotImplemented
+
+    __rmul__ = __mul__
+
+    def __mod__(self, arg: t.Any) -> "te.Self":
+        if isinstance(arg, tuple):
+            # a tuple of arguments, each wrapped
+            arg = tuple(_MarkupEscapeHelper(x, self.escape) for x in arg)
+        elif hasattr(type(arg), "__getitem__") and not isinstance(arg, str):
+            # a mapping of arguments, wrapped
+            arg = _MarkupEscapeHelper(arg, self.escape)
+        else:
+            # a single argument, wrapped with the helper and a tuple
+            arg = (_MarkupEscapeHelper(arg, self.escape),)
+
+        return self.__class__(super().__mod__(arg))
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({super().__repr__()})"
+
+    def join(self, seq: t.Iterable[t.Union[str, "HasHTML"]]) -> "te.Self":
+        return self.__class__(super().join(map(self.escape, seq)))
+
+    join.__doc__ = str.join.__doc__
+
+    def split(  # type: ignore[override]
+        self, sep: t.Optional[str] = None, maxsplit: int = -1
+    ) -> t.List["te.Self"]:
+        return [self.__class__(v) for v in super().split(sep, maxsplit)]
+
+    split.__doc__ = str.split.__doc__
+
+    def rsplit(  # type: ignore[override]
+        self, sep: t.Optional[str] = None, maxsplit: int = -1
+    ) -> t.List["te.Self"]:
+        return [self.__class__(v) for v in super().rsplit(sep, maxsplit)]
+
+    rsplit.__doc__ = str.rsplit.__doc__
+
+    def splitlines(  # type: ignore[override]
+        self, keepends: bool = False
+    ) -> t.List["te.Self"]:
+        return [self.__class__(v) for v in super().splitlines(keepends)]
+
+    splitlines.__doc__ = str.splitlines.__doc__
+
+    def unescape(self) -> str:
+        """Convert escaped markup back into a text string. This replaces
+        HTML entities with the characters they represent.
+
+        >>> Markup("Main &raquo; <em>About</em>").unescape()
+        'Main » <em>About</em>'
+        """
+        from html import unescape
+
+        return unescape(str(self))
+
+    def striptags(self) -> str:
+        """:meth:`unescape` the markup, remove tags, and normalize
+        whitespace to single spaces.
+
+        >>> Markup("Main &raquo;\t<em>About</em>").striptags()
+        'Main » About'
+        """
+        value = str(self)
+
+        # Look for comments then tags separately. Otherwise, a comment that
+        # contains a tag would end early, leaving some of the comment behind.
+
+        while True:
+            # keep finding comment start marks
+            start = value.find("<!--")
+
+            if start == -1:
+                break
+
+            # find a comment end mark beyond the start, otherwise stop
+            end = value.find("-->", start)
+
+            if end == -1:
+                break
+
+            value = f"{value[:start]}{value[end + 3:]}"
+
+        # remove tags using the same method
+        while True:
+            start = value.find("<")
+
+            if start == -1:
+                break
+
+            end = value.find(">", start)
+
+            if end == -1:
+                break
+
+            value = f"{value[:start]}{value[end + 1:]}"
+
+        # collapse spaces
+        value = " ".join(value.split())
+        return self.__class__(value).unescape()
+
+    @classmethod
+    def escape(cls, s: t.Any) -> "te.Self":
+        """Escape a string. Calls :func:`escape` and ensures that for
+        subclasses the correct type is returned.
+        """
+        rv = escape(s)
+
+        if rv.__class__ is not cls:
+            return cls(rv)
+
+        return rv  # type: ignore[return-value]
+
+    __getitem__ = _simple_escaping_wrapper(str.__getitem__)
+    capitalize = _simple_escaping_wrapper(str.capitalize)
+    title = _simple_escaping_wrapper(str.title)
+    lower = _simple_escaping_wrapper(str.lower)
+    upper = _simple_escaping_wrapper(str.upper)
+    replace = _simple_escaping_wrapper(str.replace)
+    ljust = _simple_escaping_wrapper(str.ljust)
+    rjust = _simple_escaping_wrapper(str.rjust)
+    lstrip = _simple_escaping_wrapper(str.lstrip)
+    rstrip = _simple_escaping_wrapper(str.rstrip)
+    center = _simple_escaping_wrapper(str.center)
+    strip = _simple_escaping_wrapper(str.strip)
+    translate = _simple_escaping_wrapper(str.translate)
+    expandtabs = _simple_escaping_wrapper(str.expandtabs)
+    swapcase = _simple_escaping_wrapper(str.swapcase)
+    zfill = _simple_escaping_wrapper(str.zfill)
+    casefold = _simple_escaping_wrapper(str.casefold)
+
+    if sys.version_info >= (3, 9):
+        removeprefix = _simple_escaping_wrapper(str.removeprefix)
+        removesuffix = _simple_escaping_wrapper(str.removesuffix)
+
+    def partition(self, sep: str) -> t.Tuple["te.Self", "te.Self", "te.Self"]:
+        l, s, r = super().partition(self.escape(sep))
+        cls = self.__class__
+        return cls(l), cls(s), cls(r)
+
+    def rpartition(self, sep: str) -> t.Tuple["te.Self", "te.Self", "te.Self"]:
+        l, s, r = super().rpartition(self.escape(sep))
+        cls = self.__class__
+        return cls(l), cls(s), cls(r)
+
+    def format(self, *args: t.Any, **kwargs: t.Any) -> "te.Self":
+        formatter = EscapeFormatter(self.escape)
+        return self.__class__(formatter.vformat(self, args, kwargs))
+
+    def format_map(  # type: ignore[override]
+        self, map: t.Mapping[str, t.Any]
+    ) -> "te.Self":
+        formatter = EscapeFormatter(self.escape)
+        return self.__class__(formatter.vformat(self, (), map))
+
+    def __html_format__(self, format_spec: str) -> "te.Self":
+        if format_spec:
+            raise ValueError("Unsupported format specification for Markup.")
+
+        return self
 
 
-__all__ = ['Memory', 'MemorizedResult', 'PrintTime', 'Logger', 'hash', 'dump',
-           'load', 'Parallel', 'delayed', 'cpu_count', 'effective_n_jobs',
-           'register_parallel_backend', 'parallel_backend', 'expires_after',
-           'register_store_backend', 'register_compressor',
-           'wrap_non_picklable_objects', 'parallel_config']
+class EscapeFormatter(string.Formatter):
+    __slots__ = ("escape",)
+
+    def __init__(self, escape: t.Callable[[t.Any], Markup]) -> None:
+        self.escape = escape
+        super().__init__()
+
+    def format_field(self, value: t.Any, format_spec: str) -> str:
+        if hasattr(value, "__html_format__"):
+            rv = value.__html_format__(format_spec)
+        elif hasattr(value, "__html__"):
+            if format_spec:
+                raise ValueError(
+                    f"Format specifier {format_spec} given, but {type(value)} does not"
+                    " define __html_format__. A class that defines __html__ must define"
+                    " __html_format__ to work with format specifiers."
+                )
+            rv = value.__html__()
+        else:
+            # We need to make sure the format spec is str here as
+            # otherwise the wrong callback methods are invoked.
+            rv = string.Formatter.format_field(self, value, str(format_spec))
+        return str(self.escape(rv))
 
 
-# Workaround issue discovered in intel-openmp 2019.5:
-# https://github.com/ContinuumIO/anaconda-issues/issues/11294
-os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+_ListOrDict = t.TypeVar("_ListOrDict", list, dict)
+
+
+def _escape_argspec(
+    obj: _ListOrDict, iterable: t.Iterable[t.Any], escape: t.Callable[[t.Any], Markup]
+) -> _ListOrDict:
+    """Helper for various string-wrapped functions."""
+    for key, value in iterable:
+        if isinstance(value, str) or hasattr(value, "__html__"):
+            obj[key] = escape(value)
+
+    return obj
+
+
+class _MarkupEscapeHelper:
+    """Helper for :meth:`Markup.__mod__`."""
+
+    __slots__ = ("obj", "escape")
+
+    def __init__(self, obj: t.Any, escape: t.Callable[[t.Any], Markup]) -> None:
+        self.obj = obj
+        self.escape = escape
+
+    def __getitem__(self, item: t.Any) -> "te.Self":
+        return self.__class__(self.obj[item], self.escape)
+
+    def __str__(self) -> str:
+        return str(self.escape(self.obj))
+
+    def __repr__(self) -> str:
+        return str(self.escape(repr(self.obj)))
+
+    def __int__(self) -> int:
+        return int(self.obj)
+
+    def __float__(self) -> float:
+        return float(self.obj)
+
+
+# circular import
+try:
+    from ._speedups import escape as escape
+    from ._speedups import escape_silent as escape_silent
+    from ._speedups import soft_str as soft_str
+except ImportError:
+    from ._native import escape as escape
+    from ._native import escape_silent as escape_silent  # noqa: F401
+    from ._native import soft_str as soft_str  # noqa: F401
